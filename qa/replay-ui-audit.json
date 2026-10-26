@@ -1,0 +1,22 @@
+{
+  "passed": true,
+  "checks": [
+    "source values exact",
+    "frozen prediction exact",
+    "horizon does not change current observation",
+    "risk unavailable not zero",
+    "mode isolation",
+    "clock playback",
+    "spatial selection",
+    "inspection record creation",
+    "six export formats",
+    "CSV row counts",
+    "invalid range rejected",
+    "8-model table",
+    "assistant source boundary",
+    "mobile no overflow"
+  ],
+  "frames": 181,
+  "nodes": 72,
+  "horizons": 60
+}

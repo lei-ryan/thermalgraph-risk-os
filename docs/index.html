@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="数据中心温度场预测、不确定性预警、空间诊断与核查建议可视分析系统">
+  <title>ThermalGraph OS</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23142c3b'/%3E%3Cpath d='M8 8h16M16 8v16M8 16h16' stroke='%2358d5cf' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="app.css">
+  <link rel="stylesheet" href="twin.css">
+  <link rel="stylesheet" href="replay.css">
+  <script type="importmap">{"imports":{"three":"./vendor/three.module.min.js"}}</script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="主导航">
+      <div class="brand"><span class="brand-mark">TG</span><div><strong>ThermalGraph</strong><small>Risk Analysis OS</small></div></div>
+      <nav>
+        <button class="nav-item active" data-view="spatial"><span>01</span><b>空间态势</b><small>温度场与拓扑</small></button>
+        <button class="nav-item" data-view="events"><span>02</span><b>事件处置</b><small>滚动预警与诊断</small></button>
+        <button class="nav-item" data-view="audit"><span>03</span><b>研究审计</b><small>性能与证据复核</small></button>
+        <button class="nav-item" data-view="actions"><span>04</span><b>建议动作</b><small>核查清单与反馈</small></button>
+      </nav>
+      <div class="sidebar-foot"><span class="status-dot"></span><div><b>交互演示模式</b><small>尚未接入实时数据服务</small></div></div>
+    </aside>
+
+    <div class="content-shell">
+      <header class="topbar">
+        <div><p class="eyebrow" id="page-kicker">OPERATIONS · SPATIAL VIEW</p><h1 id="page-title">空间态势中心</h1></div>
+        <div class="top-meta"><span>固定测试场景</span><b>2023-02-18 10:00</b><button id="theme-toggle" type="button" aria-label="切换明暗主题">◐</button></div>
+      </header>
+
+      <main>
+        <section class="view active" id="view-spatial" data-title="空间态势中心" data-kicker="OPERATIONS · SPATIAL VIEW">
+          <div class="control-strip">
+            <label>数据模式<select id="data-mode"><option value="replay">真实归档回放</option><option value="demo">功能示例 · 合成数值</option></select></label>
+            <label>预测模型<select disabled id="model-source"><option>Main · 冻结部署预测</option></select></label>
+            <label>风险数据状态<select disabled id="risk-source"><option>同版本节点概率待接入</option></select></label>
+            <label class="range-label">预测视野 <b id="horizon-label">15 min</b><input id="horizon" type="range" min="1" max="60" value="15"></label>
+          </div>
+          <div class="replay-deck" id="replay-deck">
+            <div class="replay-heading"><div><span class="live-chip">ARCHIVE REPLAY</span><b>TDC2.0 / 2023.02.18</b><small>记录时间，未作时区转换</small></div><button class="secondary" id="open-export">导出记录 ↗</button></div>
+            <div class="replay-transport"><button id="replay-prev" aria-label="前一分钟">‹</button><button id="replay-play" class="primary">播放</button><button id="replay-next" aria-label="后一分钟">›</button><input id="replay-slider" type="range" min="0" max="180" value="60" aria-label="回放时刻"><label>时刻<input id="replay-time" type="time" min="09:00" max="12:00" value="10:00" step="60"></label><label>步进速度<select id="replay-speed"><option value="1000">1 min / 秒</option><option value="250">4 min / 秒</option><option value="100">10 min / 秒</option></select></label></div>
+            <div class="replay-range"><span>09:00</span><span id="replay-position">正在读取归档…</span><span>12:00</span></div>
+          </div>
+          <div class="spatial-layout">
+            <div class="spatial-main">
+              <div class="section-heading"><div><h2>数据中心三维空间映射</h2><p>R05 / R06 · 前侧面向中央冷通道 · 72个监测节点</p></div><span class="twin-data-badge">数值演示</span></div>
+              <div class="twin-layer-tabs" role="tablist" aria-label="空间数据图层">
+                <button id="layer-temperature" role="tab" aria-selected="true" aria-controls="twin-stage" class="active" data-field="temperature"><span class="layer-icon">T</span><span><b>当前温度分布</b><small>同一观测时刻 · °C</small></span></button>
+                <button id="layer-risk" role="tab" aria-selected="false" aria-controls="twin-stage" data-field="risk"><span class="layer-icon">P</span><span><b>未来风险分布</b><small>t + <em id="layer-horizon">15</em> min · 概率 %</small></span></button>
+              </div>
+              <div class="twin-toolbar"><div class="twin-camera-controls" aria-label="相机视角"><button data-pose="overview" class="active">全景</button><button data-pose="top">俯视</button><button data-pose="aisle">冷通道</button><button data-pose="back">后侧</button></div><div class="twin-display-controls"><label><input type="checkbox" id="twin-edges">RC连接</label><label><input type="checkbox" id="twin-shell" checked>机架外壳</label><button id="twin-reset" aria-label="重置相机">重置视角</button></div></div>
+              <div class="twin-stage" id="twin-stage" role="tabpanel" aria-labelledby="layer-temperature">
+                <div id="twin-canvas" aria-label="可旋转的三维机房，拖动旋转，滚轮缩放，右键平移"></div>
+                <div id="twin-labels" class="twin-labels" aria-hidden="true"></div>
+                <div class="twin-scene-caption"><b id="twin-field-name">CURRENT TEMPERATURE</b><span id="twin-field-time">2023-02-18 10:00 · 当前时刻</span></div>
+                <div class="twin-north">Y ↑<small>HEIGHT</small></div>
+                <div id="twin-tooltip" class="twin-tooltip" hidden></div>
+                <div id="twin-loading" class="twin-loading">正在构建三维机房…</div>
+                <div class="twin-colorbar"><div><b id="twin-color-title">温度 / °C</b><span>固定色标</span></div><div id="twin-gradient"></div><div id="twin-color-ticks"><span>22</span><span>26</span><span>30</span><span>34</span></div></div>
+                <div class="twin-instructions">拖动旋转 · 滚轮缩放 · 右键平移 · 点击测点</div>
+              </div>
+              <div class="twin-footer"><span>拓扑：12机架 / 72节点 / 324条有向候选边</span><span>结构映射，非测绘尺寸 · 色块对应测点，非CFD插值</span></div>
+              <div class="twin-selection-controls"><label>定位机架<select id="twin-rack-select" aria-label="定位机架"></select></label><label>监测位置<select id="twin-node-select" aria-label="监测位置"><option value="0">Front · 下部</option><option value="1">Front · 中部</option><option value="2">Front · 上部</option><option value="3">Back · 下部</option><option value="4" selected>Back · 中部</option><option value="5">Back · 上部</option></select></label><span id="twin-visible-count">显示72个节点</span></div>
+              <div class="stat-row"><article><small>当前节点温度范围</small><strong id="twin-temp-range">—</strong><span>观测快照演示</span></article><article><small>当前图层</small><strong id="twin-layer-summary">当前温度</strong><span id="twin-summary-time">固定观测时刻</span></article><article><small>未来 <em id="stat-horizon">15</em> min最高节点风险</small><strong id="stat-risk">—</strong><span>指定未来时刻的概率演示</span></article></div>
+              <div class="trajectory-panel"><div class="section-heading"><div><h2 id="trajectory-title">Rack 07 · Mid Front</h2><p>历史温度、未来轨迹及不确定性范围</p></div><div class="legend line-legend"><span><i></i>Observed</span><span><i></i>Main</span></div></div><svg id="trajectory-chart" viewBox="0 0 760 220" role="img" aria-label="所选节点温度轨迹"><line class="axis" x1="46" y1="184" x2="736" y2="184"/><line class="axis" x1="46" y1="20" x2="46" y2="184"/><line class="gridline" x1="46" y1="70" x2="736" y2="70"/><line class="gridline" x1="46" y1="128" x2="736" y2="128"/><text x="8" y="73">25.0</text><text x="8" y="131">24.5</text><text x="45" y="205">−60</text><text x="374" y="205">Now</text><text x="704" y="205">+60 min</text><path class="uncertainty-band" d="M390 112 C470 100 570 82 736 62 L736 111 C580 124 480 132 390 129Z"/><path class="observed-line" d="M48 154 C95 146 135 153 175 139 S242 142 286 124 S345 128 390 116"/><path class="forecast-line" d="M390 116 C480 108 580 94 736 78"/><circle id="horizon-point" cx="476" cy="106" r="5"/></svg></div>
+            </div>
+            <aside class="context-panel" aria-live="polite"><p class="eyebrow">CURRENT SELECTION</p><h2 id="selected-rack">Rack 07</h2><div class="kv"><span>机架负荷</span><b id="rack-power">6.4 kW</b></div><div class="kv"><span>Mid Front</span><b id="front-temp">24.3 °C</b></div><div class="kv"><span>Mid Back</span><b id="back-temp">26.1 °C</b></div><div class="kv"><span>Front → Back 温升</span><b id="temp-rise">+1.8 °C</b></div><hr><h3>未来风险</h3><div class="risk-meter"><i id="risk-fill"></i></div><div class="kv"><span id="risk-label">15 min内热偏离概率</span><b id="risk-value">68%</b></div><div class="segmented"><button class="active" data-layer="node">节点</button><button data-layer="edge">边</button><button data-layer="subgraph">子图</button></div><div class="diagnosis-box"><small>定位对象</small><b id="diagnosis-target">R07 Mid Back</b><p id="diagnosis-note">后侧中部预测轨迹偏离观测参考。</p></div><button class="primary full" id="spatial-to-actions">形成核查动作</button><p class="boundary-note">建议动作仅用于人工核查，不等同于已验证故障根因或自动控制指令。</p></aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-events" data-title="风险事件指挥台" data-kicker="OPERATIONS · EVENT RESPONSE">
+          <div class="event-layout"><aside class="event-queue"><div class="section-heading"><div><h2>活动风险过程</h2><p>滚动概率预警</p></div><span class="count">4</span></div><div id="event-list"></div></aside>
+          <div class="event-center" aria-live="polite"><div class="case-title"><div><span class="event-state">概率持续上升</span><h2 id="event-title">Rack 07 后侧局部热偏离</h2><p id="event-subtitle">首次通知09:45 · 当前修订10:00 · 图空间标准</p></div><button class="secondary">历史回放</button></div><div class="stat-row compact"><article><small>当前概率</small><strong id="event-prob">78%</strong></article><article><small>最早阳性视野</small><strong id="event-horizon">18 min</strong></article><article><small>定位置信度</small><strong>0.86</strong></article><article><small>风险层级</small><strong id="event-level">节点</strong></article></div>
+            <div class="event-section"><div class="section-heading"><div><h2>异常形成阶段</h2><p>区分偏离起点、滚动通知与候选确认</p></div><b>当前10:00</b></div><div class="phase-track"><i class="phase-progress"></i><i class="phase-future"></i><i class="phase-now"></i><span style="left:0">09:20<br>偏离起点</span><span style="left:64%">10:00<br>当前通知</span><span style="left:100%">10:18<br>候选确认</span></div></div>
+            <div class="event-section"><div class="section-heading"><div><h2>未来1–60 min风险概率</h2><p>主模型温度轨迹映射与Persistence参照</p></div><b>通知阈值50%</b></div><svg class="risk-chart" viewBox="0 0 760 250" role="img" aria-label="未来风险概率曲线"><line class="axis" x1="48" y1="206" x2="736" y2="206"/><line class="axis" x1="48" y1="25" x2="48" y2="206"/><line class="threshold" x1="48" y1="116" x2="736" y2="116"/><text x="8" y="29">100%</text><text x="14" y="120">50%</text><text x="48" y="226">1</text><text x="210" y="226">15</text><text x="380" y="226">30</text><text x="704" y="226">60 min</text><path class="risk-band" d="M48 179 C170 162 275 128 380 84 S610 53 736 46 L736 77 C610 86 500 102 380 116 S170 190 48 197Z"/><path class="risk-main" d="M48 188 C170 176 275 139 380 99 S610 68 736 59"/><path class="risk-base" d="M48 191 C180 184 280 170 380 145 S590 127 736 105"/><circle cx="265" cy="141" r="5"/><text x="275" y="137">首次跨越50%</text></svg></div>
+            <div class="event-section revisions"><div class="section-heading"><h2>滚动修订</h2><p>只使用发布时刻可用信息</p></div><div><span>09:40</span><i><b style="width:41%"></b></i><strong>41%</strong></div><div><span>09:45</span><i><b style="width:56%"></b></i><strong>56%</strong></div><div><span>09:50</span><i><b style="width:67%"></b></i><strong>67%</strong></div><div><span>10:00</span><i><b style="width:78%"></b></i><strong>78%</strong></div></div>
+          </div>
+          <aside class="evidence-panel"><p class="eyebrow">SPATIAL DIAGNOSIS</p><h2>证据链</h2><div class="mini-network"><span>R06</span><span class="hot">R07·B</span><span class="hot">R08·B</span><span>R09</span></div><div class="evidence-level"><div><b>节点</b><strong>0.91</strong></div><p>R07 Mid Back为最高风险节点</p></div><div class="evidence-level"><div><b>边</b><strong>0.84</strong></div><p>R07 Front → Back耦合变化显著</p></div><div class="evidence-level"><div><b>子图</b><strong>0.76</strong></div><p>R07–R08后侧构成局部连续区域</p></div><button class="primary full" id="event-to-actions">生成建议动作</button></aside></div>
+        </section>
+
+        <section class="view" id="view-audit" data-title="科研分析工作台" data-kicker="RESEARCH · MODEL AUDIT">
+          <div class="control-strip audit-controls"><label>热偏离标准<select id="audit-standard"><option>图空间标准</option><option>非图多变量标准</option><option>节点序列标准</option><option>经典统计标准</option></select></label><label>分析对象<select><option>全部72个温度节点</option><option>Front节点</option><option>Back节点</option></select></label><label>预测视野<select><option>1–60 min</option><option>1–15 min</option><option>16–30 min</option><option>31–60 min</option></select></label><button class="primary" id="run-audit">运行分析</button></div>
+          <div class="audit-content"><div class="stat-row"><article><small>Main MAE</small><strong>0.0889 °C</strong><span>完整部署链路</span></article><article><small>Persistence Skill</small><strong>28.1%</strong><span>1–60 min整体</span></article><article><small>最佳外部基线</small><strong>TimeMixer</strong><span>MAE 0.1023 °C</span></article><article><small>固定测试起点</small><strong>40,201</strong><span>72 nodes × 60 horizons</span></article></div>
+            <div class="audit-grid"><div><div class="panel-block"><div class="section-heading"><div><h2>MAE随预测视野变化</h2><p>统一数据、预测视野与评价口径</p></div><div class="legend"><span><i class="lg-main"></i>Main</span><span><i class="lg-time"></i>TimeMixer</span><span><i class="lg-filter"></i>TimeFilter</span><span><i class="lg-pers"></i>Persistence</span></div></div><svg class="audit-chart" viewBox="0 0 760 260" role="img" aria-label="多模型预测误差曲线"><line class="axis" x1="48" y1="210" x2="736" y2="210"/><line class="axis" x1="48" y1="24" x2="48" y2="210"/><line class="gridline" x1="48" y1="75" x2="736" y2="75"/><line class="gridline" x1="48" y1="140" x2="736" y2="140"/><text x="8" y="79">0.18</text><text x="8" y="144">0.10</text><text x="48" y="230">1</text><text x="205" y="230">15</text><text x="380" y="230">30</text><text x="700" y="230">60 min</text><path class="audit-main" d="M48 200 C180 194 306 168 430 135 S590 102 736 83"/><path class="audit-time" d="M48 192 C180 180 306 149 430 118 S590 87 736 76"/><path class="audit-filter" d="M48 188 C180 172 306 141 430 110 S590 81 736 71"/><path class="audit-pers" d="M48 185 C180 164 306 130 430 99 S590 72 736 63"/></svg></div><div class="panel-block"><div class="section-heading"><div><h2>节点 × 预测视野误差矩阵</h2><p>识别空间误差集中区域</p></div><div class="segmented matrix-tabs"><button class="active" data-mode="node">节点</button><button data-mode="edge">边</button><button data-mode="subgraph">子图</button></div></div><div class="error-matrix" id="error-matrix"></div></div></div>
+            <aside><div class="panel-block"><h2>统一结果排名</h2><p id="ranking-standard">图空间标准</p><table><thead><tr><th>模型</th><th>MAE</th><th>Skill</th></tr></thead><tbody><tr class="best"><td>Main</td><td>0.0889</td><td>28.1%</td></tr><tr><td>TimeMixer</td><td>0.1023</td><td>17.3%</td></tr><tr><td>TimeFilter</td><td>0.1088</td><td>12.0%</td></tr><tr><td>Persistence</td><td>0.1236</td><td>0</td></tr><tr><td>LSTM</td><td>0.1236</td><td>0</td></tr><tr><td>A-PCNN</td><td>0.1240</td><td>−0.3%</td></tr></tbody></table></div><div class="panel-block"><h2>预测链路审计</h2><p>区分模型能力与部署后处理</p><ol class="audit-flow"><li><span>1</span><div><b>基础温度轨迹</b><small>RC图算子与多视野响应</small></div><strong>0.1024</strong></li><li><span>2</span><div><b>因果在线残差修正</b><small>仅使用已成熟历史误差</small></div><strong>0.0889</strong></li><li><span>3</span><div><b>安全门控</b><small>最终部署温度轨迹</small></div><strong>0.0889</strong></li></ol></div><div class="panel-block provenance"><h2>复现信息</h2><div><span>Model</span><b>v741</b></div><div><span>Data</span><b>test_202302</b></div><div><span>Graph</span><b>rc72_e324</b></div><div><span>Seed</span><b>2026</b></div></div></aside></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-actions" data-title="建议动作中心" data-kicker="DECISION SUPPORT · ACTION REVIEW">
+          <div class="action-header"><div><span class="decision-label">HUMAN IN THE LOOP</span><h2>物理一致的核查动作</h2><p>根据节点、边和子图风险证据形成核查优先级；不替代故障诊断，不直接控制设备。</p></div><div class="action-summary"><div><small>待核查</small><strong id="pending-count">3</strong></div><div><small>执行中</small><strong id="progress-count">1</strong></div><div><small>已完成</small><strong id="done-count">0</strong></div></div></div>
+          <div class="action-layout"><aside class="action-list-panel"><div class="section-heading"><div><h2>动作清单</h2><p id="action-source">来源：E-023 · R07后侧局部热偏离</p></div><select id="action-filter" aria-label="动作状态筛选"><option value="all">全部状态</option><option value="pending">待核查</option><option value="progress">执行中</option><option value="done">已完成</option></select></div><div id="action-list"></div></aside>
+          <div class="action-detail" aria-live="polite"><div class="detail-head"><div><span class="priority" id="action-priority">优先级 P1</span><h2 id="action-title">核查R07后侧局部排风与遮挡</h2><p id="action-id">Action A-001 · 节点证据</p></div><select id="action-status" aria-label="更新动作状态"><option value="pending">待核查</option><option value="progress">执行中</option><option value="done">已完成</option><option value="na">不适用</option></select></div><div class="detail-grid"><section><h3>建议动作</h3><p id="action-description">检查R07后侧中部排风路径、线缆遮挡和局部回流，记录是否存在显著气流阻塞。</p></section><section><h3>核查对象</h3><p id="action-target">Rack 07 · Mid Back · Front→Back路径</p></section><section><h3>触发证据</h3><ul id="action-evidence"><li>未来18 min热偏离概率78%</li><li>R07 Mid Back节点定位置信度0.91</li><li>Front→Back有效耦合变化显著</li></ul></section><section><h3>安全边界</h3><p>仅进行观察、复核和记录。任何控制参数变更必须进入既有运维审批流程。</p></section></div><label class="notes-label">核查记录<textarea id="action-notes" rows="5" placeholder="记录观察结果、证据或不适用原因"></textarea></label><div class="detail-actions"><button class="secondary" id="save-note">保存记录</button><button class="primary" id="complete-action">标记为已完成</button></div><div class="audit-trail"><h3>证据与执行轨迹</h3><div id="action-history"></div></div></div>
+          <aside class="action-provenance"><p class="eyebrow">PROVENANCE</p><h2>决策依据</h2><div class="kv"><span>风险事件</span><b id="prov-event">E-023</b></div><div class="kv"><span>发布时刻</span><b>2023-02-18 10:00</b></div><div class="kv"><span>预测模型</span><b>Main V74.1</b></div><div class="kv"><span>热偏离标准</span><b>图空间标准</b></div><div class="kv"><span>预测视野</span><b>18 min</b></div><hr><h3>动作生成原则</h3><ol class="principles"><li>空间定位决定核查对象</li><li>物理拓扑限定核查路径</li><li>辅助变量只提供佐证</li><li>人工确认形成最终记录</li></ol><button class="secondary full" id="back-to-event">返回风险事件</button></aside></div>
+        </section>
+      </main>
+    </div>
+  </div>
+  <button class="assistant-fab" id="assistant-toggle" type="button" aria-label="打开人工智能咨询助手"><span>AI</span><b>咨询助手</b></button>
+  <aside class="assistant-drawer" id="assistant-drawer" aria-label="人工智能咨询助手" aria-hidden="true">
+    <header><div><span class="assistant-mark">AI</span><div><b>ThermalGraph Assistant</b><small>基于当前风险证据的咨询助手</small></div></div><button id="assistant-close" type="button" aria-label="关闭咨询助手">×</button></header>
+    <div class="assistant-context"><span id="assistant-context-rack">Rack 07</span><span id="assistant-context-horizon">15 min</span><span id="assistant-context-layer">节点证据</span></div>
+    <div class="assistant-messages" id="assistant-messages" aria-live="polite">
+      <div class="assistant-message bot"><small>AI 助手</small><p>我可以解释当前风险概率、空间定位证据、模型比较和建议动作。所有回答均基于本系统当前展示的研究结果。</p></div>
+    </div>
+    <div class="assistant-prompts" id="assistant-prompts"><button>为什么R07风险较高？</button><button>下一步应该核查什么？</button><button>Main相比Persistence有什么优势？</button><button>当前结论有什么边界？</button></div>
+    <form class="assistant-form" id="assistant-form"><label for="assistant-input">咨询问题</label><div><input id="assistant-input" autocomplete="off" placeholder="例如：边级证据代表什么？"><button type="submit">发送</button></div></form>
+    <p class="assistant-disclaimer">助手用于研究解释和人工核查支持，不生成自动控制指令，也不把模型证据等同于真实故障标签。</p>
+  </aside>
+  <div class="assistant-backdrop" id="assistant-backdrop"></div>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog id="export-dialog" aria-labelledby="export-title"><form method="dialog"><header><div><p class="eyebrow">DATA & RECORDS</p><h2 id="export-title">导出研究记录</h2></div><button value="close" aria-label="关闭导出">×</button></header></form><p>原始观测、冻结预测和人工核查记录分开导出；缺失风险保持为空。</p><div class="export-range"><label>起始时刻<input type="time" id="export-start" value="09:00" min="09:00" max="12:00"></label><label>结束时刻<input type="time" id="export-end" value="12:00" min="09:00" max="12:00"></label></div><div class="export-grid"><button data-export="observations">观测数据 CSV<small>温度、质量掩码、湿度、PA/PB功率</small></button><button data-export="predictions">预测轨迹 CSV<small>起点 × 1–60 min × 72节点</small></button><button data-export="actions">核查记录 JSON<small>本机保存的状态、备注、历史</small></button><button data-export="manifest">来源清单 JSON<small>时间口径、模型版本、文件校验值</small></button><button data-export="image">三维场景 PNG<small>当前相机视角与图层</small></button><button data-export="metrics">研究指标 CSV<small>8个模型 · 完整部署链路口径</small></button></div><p id="export-status" role="status"></p></dialog>
+  <script src="app.js"></script>
+  <script src="replay.js"></script>
+  <script type="module" src="twin.js"></script>
+</body>
+</html>

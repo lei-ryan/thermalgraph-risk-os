@@ -1,0 +1,33 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('node:path');
+(async()=>{
+ const browser=await chromium.launch({channel:'msedge',headless:true,args:['--enable-unsafe-swiftshader']});
+ const page=await browser.newPage({viewport:{width:1680,height:1100},acceptDownloads:true});const errors=[];
+ page.on('pageerror',e=>errors.push(e.message));
+ await page.goto('http://127.0.0.1:8894/',{waitUntil:'networkidle'});await page.waitForFunction(()=>window.thermalTwin);await page.waitForTimeout(1500);
+ const snap=()=>page.evaluate(()=>window.thermalTwin.getSnapshot());
+ let s=await snap();assert.equal(s.dataMode,'historical_replay');assert.equal(s.nodeCount,72);assert(s.temperatures.every(t=>t>=29&&t<=43));
+ const source=JSON.parse(fs.readFileSync(path.join(__dirname,'../docs/data/replay.json'),'utf8'));
+ assert.deepEqual(s.temperatures,source.temperature[source.originOffsets[60]]);
+ const dir=path.join(__dirname,'screenshots');fs.mkdirSync(dir,{recursive:true});await page.screenshot({path:path.join(dir,'archive-spatial-desktop.png'),fullPage:true});
+ await page.locator('#horizon').fill('60');await page.locator('#horizon').dispatchEvent('input');assert.deepEqual((await snap()).temperatures,s.temperatures);
+ const selection=await page.evaluate(()=>window.thermalTwin.getSelection());assert.equal(selection.prediction,source.prediction[60][59][selection.index]);assert.equal(selection.risk,null);
+ await page.locator('#layer-risk').click();assert((await snap()).risks.every(v=>v===null));assert((await page.locator('#twin-color-ticks').innerText()).includes('未接入'));
+ await page.locator('#replay-slider').fill('180');await page.locator('#replay-slider').dispatchEvent('input');assert.deepEqual((await snap()).temperatures,source.temperature[source.originOffsets[180]]);
+ await page.locator('#data-mode').selectOption('demo');assert.equal((await snap()).dataMode,'illustrative');assert((await snap()).risks.every(v=>v>0));
+ await page.locator('#data-mode').selectOption('replay');await page.locator('#layer-temperature').click();await page.locator('#replay-slider').fill('60');await page.locator('#replay-slider').dispatchEvent('input');
+ await page.locator('#replay-play').click();await page.waitForTimeout(1300);await page.locator('#replay-play').click();assert.equal(await page.locator('#replay-slider').inputValue(),'61');
+ await page.locator('#twin-rack-select').selectOption('8');await page.locator('#twin-node-select').selectOption('4');assert.equal((await snap()).selected,'R0603_THBM');
+ await page.locator('#spatial-to-actions').click();assert((await page.locator('#action-title').innerText()).includes('R0603_THBM'));
+ await page.locator('#action-notes').fill('QA核查备注，含逗号与中文。');await page.locator('#save-note').click();
+ await page.locator('.top-meta .secondary').click();await page.locator('#export-start').fill('10:00');await page.locator('#export-end').fill('10:01');
+ const saved={};for(const kind of ['observations','predictions','actions','manifest','metrics','image']){const wait=page.waitForEvent('download');await page.locator('[data-export='+kind+']').click();const d=await wait;const p=await d.path();saved[kind]=fs.readFileSync(p);assert(saved[kind].length>40);}
+ assert.equal(saved.observations.toString('utf8').split('\r\n').length,145);assert.equal(saved.predictions.toString('utf8').split('\r\n').length,8641);
+ assert(JSON.parse(saved.actions).records.some(a=>a.notes==='QA核查备注，含逗号与中文。'));assert.equal(JSON.parse(saved.manifest).selection.from,'2023-02-18 10:00');
+ await page.locator('#export-start').fill('11:00');await page.locator('#export-end').fill('10:00');await page.locator('[data-export=observations]').click();assert((await page.locator('#export-status').innerText()).includes('结束不得早于'));
+ await page.locator('#export-dialog [aria-label="关闭导出"]').click();await page.locator('[data-view=audit]').click();assert.equal(await page.locator('#view-audit tbody tr').count(),8);await page.screenshot({path:path.join(dir,'archive-audit-desktop.png'),fullPage:true});
+ await page.locator('[data-view=spatial]').click();await page.locator('#assistant-toggle').click();await page.locator('#assistant-input').fill('当前测点数据来源');await page.locator('#assistant-form button').click();await page.waitForTimeout(300);assert((await page.locator('#assistant-messages').innerText()).includes('一分钟归档'));await page.locator('#assistant-close').click();
+ await page.setViewportSize({width:390,height:844});await page.waitForTimeout(900);await page.screenshot({path:path.join(dir,'archive-mobile.png'),fullPage:true});
+ assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));assert.deepEqual(errors,[]);
+ const report={passed:true,checks:['source values exact','frozen prediction exact','horizon does not change current observation','risk unavailable not zero','mode isolation','clock playback','spatial selection','inspection record creation','six export formats','CSV row counts','invalid range rejected','8-model table','assistant source boundary','mobile no overflow'],frames:181,nodes:72,horizons:60};fs.writeFileSync(path.join(__dirname,'replay-ui-audit.json'),JSON.stringify(report,null,2));console.log(JSON.stringify(report));await browser.close();
+})().catch(e=>{console.error(e);process.exit(1)});
