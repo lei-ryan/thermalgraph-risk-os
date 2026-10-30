@@ -6,8 +6,8 @@ import { OrbitControls } from './vendor/OrbitControls.js';
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const heights = [0.42, 1.17, 1.92];
-const levels = ['下部', '中部', '上部'];
-const view = { field: 'temperature', horizon: 15, selected: 40, edges: false, shell: true };
+const levels = ['Lower', 'Middle', 'Upper'];
+const view = { field: 'temperature', horizon: 60, selected: 40, edges: false, shell: true };
 const thermalStops = ['#2879d5', '#30b8c2', '#edd879', '#ec7653', '#c83b59'];
 const riskStops = ['#53b9bd', '#a8cd9a', '#f4da78', '#ef9853', '#db495a'];
 const sceneLabels = [], pickables = [], shells = [], panelMeshes = [], sensorMeshes = [];
@@ -15,8 +15,69 @@ let topology, nodes, scene, camera, renderer, controls, outline, graphGroup, sel
 let poseTarget = null, lastPointer = null, rendered = false;
 const archive=()=>window.thermalReplay?.get();
 const isArchive=()=>archive()?.mode==='replay';
-const percent=p=>p==null?'未接入':Math.round(p*100)+'%';
+const percent=p=>p==null?'Unavailable':Math.round(p*100)+'%';
 const number=(v,d=1)=>v==null?'—':Number(v).toFixed(d);
+const quantile=(values,q)=>{const a=values.filter(Number.isFinite).sort((x,y)=>x-y);if(!a.length)return null;const p=(a.length-1)*q,lo=Math.floor(p),hi=Math.ceil(p);return a[lo]+(a[hi]-a[lo])*(p-lo)};
+const riskBasis=new Map();
+const observationBasis={nodes:null,dynamic:null};
+const median=a=>quantile(a,.5);
+const percentileRank=(values,x)=>{const a=values.filter(Number.isFinite);if(!a.length||!Number.isFinite(x))return null;return a.filter(v=>v<=x).length/a.length;};
+function prepareObservationBasis(){
+  if(observationBasis.nodes||!isArchive())return;
+  const p=archive().packet,rows=p.temperature;
+  observationBasis.nodes=nodes.map((n,i)=>{
+    const values=rows.map(r=>r[i]).filter(Number.isFinite),center=median(values);
+    const scale=Math.max(.02,1.4826022185*median(values.map(v=>Math.abs(v-center))));
+    const zSeries=rows.map(r=>Number.isFinite(r[i])?Math.abs(r[i]-center)/scale:null);
+    const d5=rows.map((r,t)=>t>=5&&Number.isFinite(r[i])&&Number.isFinite(rows[t-5][i])?r[i]-rows[t-5][i]:null);
+    const d15=rows.map((r,t)=>t>=15&&Number.isFinite(r[i])&&Number.isFinite(rows[t-15][i])?r[i]-rows[t-15][i]:null);
+    const d5Scale=Math.max(.02,1.4826022185*median(d5.filter(Number.isFinite).map(v=>Math.abs(v-median(d5.filter(Number.isFinite))))));
+    return {center,scale,zSeries,d5,d15,d5Scale};
+  });
+  observationBasis.dynamic=rows.map((r,t)=>{
+    if(t<5)return null;let sum=0,count=0;
+    observationBasis.nodes.forEach((b,i)=>{const d=b.d5[t];if(Number.isFinite(d)){sum+=(d/b.d5Scale)**2;count++;}});
+    return count?Math.sqrt(sum/count):null;
+  });
+}
+function observationEvidence(node){
+  if(!isArchive())return null;prepareObservationBasis();
+  const p=archive().packet,o=p.originOffsets[archive().index],basis=observationBasis.nodes[node.index];
+  const statRaw=basis.zSeries[o],stat=percentileRank(basis.zSeries,statRaw);
+  const neighbourIds=[...new Set(topology.directed_edges.filter(e=>e.source_index===node.index||e.target_index===node.index).flatMap(e=>[e.source_index,e.target_index]).filter(i=>i!==node.index))];
+  const graphSeries=p.temperature.map((_,t)=>{
+    const own=basis.zSeries[t],near=neighbourIds.map(i=>observationBasis.nodes[i].zSeries[t]).filter(Number.isFinite);
+    return Number.isFinite(own)&&near.length?Math.sqrt(.1*own*own+.9*own*(near.reduce((a,b)=>a+b,0)/near.length)):null;
+  });
+  const graphRaw=graphSeries[o],graph=percentileRank(graphSeries,graphRaw);
+  const dynamicRaw=observationBasis.dynamic[o],dynamic=percentileRank(observationBasis.dynamic,dynamicRaw);
+  const d5=basis.d5[o],d15=basis.d15[o],positive5=basis.d5.filter(v=>Number.isFinite(v)&&v>0),positive15=basis.d15.filter(v=>Number.isFinite(v)&&v>0);
+  const sequence=(d5>0&&d15>0)?Math.sqrt((percentileRank(positive5,d5)||0)*(percentileRank(positive15,d15)||0)):0;
+  return {stat,graph,dynamic,sequence,raw:{stat:statRaw,graph:graphRaw,dynamic:dynamicRaw,d5,d15},neighbourCount:neighbourIds.length,note:'Support computed from the current archived replay window; formal inference still uses the frozen training references.'};
+}
+function riskSummary(node,horizon=60){
+  if(!isArchive())return null;
+  const p=archive().packet,key=node.index+':'+horizon;
+  let basis=riskBasis.get(key);
+  if(!basis){
+    const history=p.temperature.map(row=>row[node.index]).filter(Number.isFinite);
+    const center=quantile(history,.5);
+    const deviation=history.map(v=>Math.abs(v-center));
+    const radius=Math.max(.05,quantile(deviation,.95));
+    const residuals=[];
+    for(let j=0;j<p.origins.length;j++){
+      const target=p.originOffsets[j]+horizon;
+      const actual=p.temperature[target]?.[node.index],pred=p.prediction[j]?.[horizon-1]?.[node.index];
+      if(Number.isFinite(actual)&&Number.isFinite(pred))residuals.push(actual-pred);
+    }
+    basis={center,radius,residuals};riskBasis.set(key,basis);
+  }
+  const pred=p.prediction[archive().index]?.[horizon-1]?.[node.index];
+  if(!Number.isFinite(pred)||!basis.residuals.length)return null;
+  const samples=basis.residuals.map(e=>pred+e);
+  const probability=samples.filter(v=>Math.abs(v-basis.center)>basis.radius).length/samples.length;
+  return {probability,lower:quantile(samples,.05),upper:quantile(samples,.95),prediction:pred,referenceLower:basis.center-basis.radius,referenceUpper:basis.center+basis.radius,sampleCount:samples.length};
+}
 function applyFrame(){
   const a=archive();if(!a?.packet)return;
   if(isArchive()){
@@ -24,7 +85,7 @@ function applyFrame(){
     nodes.forEach((n,i)=>{n.temperature=a.packet.temperature[o][i];n.observed=a.packet.observedMask[o][i];n.staleness=a.packet.stalenessMinutes[o][i];n.rh=a.packet.rh[o][i];n.powerPA=a.packet.powerPA[o][n.rackIndex];n.powerPB=a.packet.powerPB[o][n.rackIndex];});
   }else{const demo=buildNodeData(topology.node_order);nodes.forEach((n,i)=>{n.temperature=demo[i].temperature;});}
   const values=nodes.map(n=>n.temperature).filter(Number.isFinite);$('#twin-temp-range').textContent=Math.min(...values).toFixed(1)+'–'+Math.max(...values).toFixed(1)+' °C';
-  $('#twin-temp-range').nextElementSibling.textContent=isArchive()?'真实一分钟观测':'合成快照';
+  $('#twin-temp-range').nextElementSibling.textContent=isArchive()?'Archived one-minute observations':'Synthetic snapshot';
   refreshField();
 }
 
@@ -34,7 +95,7 @@ function scalarColor(value, min, max, stops) {
   return new THREE.Color(stops[lo]).lerp(new THREE.Color(stops[lo+1]), t-lo);
 }
 function probability(node, horizon) {
-  if(isArchive())return null;
+  if(isArchive())return riskSummary(node,horizon)?.probability??null;
   const rack=node.rackIndex, row=Math.floor(rack/6), col=rack%6;
   const cluster=Math.exp(-((col-1.4)**2)/2.8)*(row ? 1 : .45);
   const susceptibility=(node.side==='Back' ? .9 : .30)*(0.78+node.heightIndex*.13);
@@ -103,9 +164,9 @@ function addRoom() {
   }
   for(let i=0;i<9;i++)box(.015,.043,1.3,4.584,.25+i*.14,0,material('#244456'));
   box(.05,.05,1.3,4.54,.04,0,material('#54cbb7'));
-  label('送风设备 · 位置示意',[5.12,2.05,0],'equipment');
-  label('中央冷通道',[0,.12,0],'aisle');
-  label('热空气区域',[-.1,.1,-3.45],'hot');label('热空气区域',[-.1,.1,3.45],'hot');
+  label('Supply-air equipment · schematic location',[5.12,2.05,0],'equipment');
+  label('Central cold aisle',[0,.12,0],'aisle');
+  label('Hot-air zone',[-.1,.1,-3.45],'hot');label('Hot-air zone',[-.1,.1,3.45],'hot');
   for(let col=0;col<6;col++){
     const x=(col-2.5)*1.2;
     for(const direction of [-1,1]){
@@ -170,7 +231,7 @@ function addGraph() {
   }
   graphGroup.visible=false;
   const legend=document.createElement('div');legend.className='twin-edge-legend';legend.id='twin-edge-legend';legend.hidden=true;
-  legend.innerHTML='<span><i style="background:#5abed0"></i>前→后 36</span><span><i style="background:#b385dc"></i>垂向 96</span><span><i style="background:#d79b43"></i>同排 120</span><span><i style="background:#62b590"></i>跨排 72</span><br>候选热耦合拓扑；不表示实测气流路径。';
+  legend.innerHTML='<span><i style="background:#5abed0"></i>Front→Back 36</span><span><i style="background:#b385dc"></i>Vertical 96</span><span><i style="background:#d79b43"></i>Same row 120</span><span><i style="background:#62b590"></i>Cross row 72</span><br>Candidate thermal-coupling topology; not measured airflow paths.';
   $('.twin-footer').after(legend);
 }
 function selectNode(index,updateMenus=true) {
@@ -184,16 +245,28 @@ function selectNode(index,updateMenus=true) {
   $('#temp-rise').textContent=(back.temperature-front.temperature>=0?'+':'')+(back.temperature-front.temperature).toFixed(1)+' °C';
   $('#front-temp').previousElementSibling.textContent=levels[n.heightIndex]+' Front';$('#back-temp').previousElementSibling.textContent=levels[n.heightIndex]+' Back';
   $('#rack-power').textContent=isArchive()?(n.powerPA==null||n.powerPB==null?'—':(n.powerPA+n.powerPB).toFixed(3)+' kW'):(4.8+(n.rackIndex%4)*.55).toFixed(1)+' kW';
-  $('#rack-power').previousElementSibling.textContent='机架负荷 · PA + PB';
+  $('#rack-power').previousElementSibling.textContent='Rack load · PA + PB';
   let card=$('#twin-node-card');
   if(!card){card=document.createElement('div');card.className='twin-node-card';card.id='twin-node-card';$('#selected-rack').after(card);}
-  card.innerHTML='<small>选中监测节点 · '+(isArchive()?(n.observed?'原始有效观测':'LOCF填充 · 陈旧'+n.staleness+' min'):'合成示例')+'</small><b>'+n.id+'</b><span>'+n.side+' · '+levels[n.heightIndex]+' · '+number(n.temperature)+' °C'+(isArchive()?' · RH '+number(n.rh)+'%':'')+'</span>';
+  card.innerHTML='<small>Selected monitoring node · '+(isArchive()?(n.observed?'valid archived observation':'LOCF-filled · stale '+n.staleness+' min'):'synthetic example')+'</small><b>'+n.id+'</b><span>'+n.side+' · '+levels[n.heightIndex]+' · '+number(n.temperature)+' °C'+(isArchive()?' · RH '+number(n.rh)+'%':'')+'</span>';
   let table=$('#twin-sensor-table');
   if(!table){table=document.createElement('table');table.id='twin-sensor-table';table.className='twin-sensor-table';$('.context-panel .segmented').before(table);}
-  table.innerHTML='<thead><tr><th>位置</th><th>当前 °C</th><th>+'+view.horizon+' min '+(isArchive()?'°C':'风险')+'</th></tr></thead><tbody>'+nodes.slice(base,base+6).map(v=>'<tr class="'+(v.index===index?'selected':'')+'"><td><button data-node-index="'+v.index+'">'+(v.side==='Front'?'F':'B')+' · '+levels[v.heightIndex]+'</button></td><td>'+number(v.temperature)+'</td><td>'+(isArchive()?number(archive().packet.prediction[archive().index][view.horizon-1][v.index],2):percent(probability(v,view.horizon)))+'</td></tr>').join('')+'</tbody>';
+  table.innerHTML='<thead><tr><th>Position</th><th>Current °C</th><th>t+60 °C</th><th>Risk</th></tr></thead><tbody>'+nodes.slice(base,base+6).map(v=>'<tr class="'+(v.index===index?'selected':'')+'"><td><button data-node-index="'+v.index+'">'+(v.side==='Front'?'F':'B')+' · '+levels[v.heightIndex]+'</button></td><td>'+number(v.temperature)+'</td><td>'+number(archive().packet.prediction[archive().index][59][v.index],2)+'</td><td>'+percent(probability(v,60))+'</td></tr>').join('')+'</tbody>';
   table.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>selectNode(+b.dataset.nodeIndex)));
-  $('#risk-value').textContent=percent(probability(n,view.horizon));$('#risk-fill').style.width=isArchive()?'0%':$('#risk-value').textContent;
-  $('#risk-label').textContent='t + '+view.horizon+' min节点热偏离概率';
+  const risk=riskSummary(n,60),riskCurve=Array.from({length:60},(_,h)=>probability(n,h+1));
+  $('#risk-value').textContent=percent(probability(n,60));
+  const evolution=$('#risk-evolution');
+  evolution.innerHTML=riskCurve.map((p,h)=>{
+    const v=Number.isFinite(p)?Math.max(0,Math.min(1,p)):0;
+    const hue=120*(1-v);
+    return '<span title="t+'+(h+1)+' min · '+Math.round(v*100)+'%" style="background:hsl('+hue.toFixed(1)+' 72% 43%)"></span>';
+  }).join('');
+  evolution.setAttribute('aria-label','Risk evolution over the next 60 minutes; t+60 risk is '+percent(probability(n,60))+'; color transitions from green for lower risk to red for higher risk');
+  $('#risk-label').textContent='t + 60 min Node Thermal-Deviation Probability';
+  $('#risk-interval').textContent=risk?number(risk.lower,2)+'–'+number(risk.upper,2)+' °C':'—';
+  const peak=Math.max(...riskCurve.filter(Number.isFinite));
+  const crossing=riskCurve.findIndex(v=>Number.isFinite(v)&&v>=.5);
+  $('#risk-confidence-note').textContent=risk?'60 min peak risk '+percent(peak)+(crossing>=0?' · first crossing of 50%: t+'+(crossing+1)+' min':' · does not exceed 50% within the forecast period'):'Risk-confidence space unavailable';
   refreshDiagnosis();
   while(selectedEdges.children.length){const obj=selectedEdges.children[0];selectedEdges.remove(obj);obj.geometry?.dispose();obj.material?.dispose();}
   topology.directed_edges.filter(e=>e.source_index===index||e.target_index===index).forEach(e=>{
@@ -203,18 +276,26 @@ function selectNode(index,updateMenus=true) {
   });
   selectedEdges.visible=view.edges;
   drawTrajectory(n);
-  window.dispatchEvent(new CustomEvent('thermal:twin-selection',{detail:{rack:n.rackIndex+1,rackName:n.rack,node:n.id,temperature:n.temperature,risk:isArchive()?null:probability(n,view.horizon)*100,horizon:view.horizon,field:view.field}}));
+  const selectedRisk=riskSummary(n,60);
+  window.dispatchEvent(new CustomEvent('thermal:twin-selection',{detail:{rack:n.rackIndex+1,rackName:n.rack,node:n.id,temperature:n.temperature,risk:selectedRisk?.probability*100,horizon:60,field:view.field}}));
 }
 function refreshDiagnosis() {
   const n=nodes[view.selected],layer=window.thermalBridge?.getState().layer||'node';
   const neighbour=nodes[(n.rackIndex%6<5?n.rackIndex+1:n.rackIndex-1)*6];
+  const base=n.rackIndex*6;
+  const pair=nodes[base+(n.side==='Front'?3+n.heightIndex:n.heightIndex)];
+  const adjacentRack=n.rackIndex%6<5?n.rackIndex+1:n.rackIndex-1;
+  const adjacent=nodes[adjacentRack*6+(n.side==='Front'?n.heightIndex:3+n.heightIndex)];
+  const members=layer==='node'?[n]:layer==='edge'?[n,pair]:[n,adjacent];
+  const confidence=members.map(v=>probability(v,60)).filter(Number.isFinite).reduce((a,b)=>a+b,0)/members.length;
   $('#diagnosis-target').textContent=layer==='node'?n.id:layer==='edge'?n.rack+' · Front → Back':n.rack+' / '+neighbour.rack;
-  $('#diagnosis-note').textContent=isArchive()?'当前为观测与预测驱动的空间核查对象，不是已验证异常或因果根因；同版本定位置信度未接入。':layer==='node'?'选中测点的当前温度及未来概率，示例映射。':layer==='edge'?'查看当前机架同高度前后侧的候选有向热耦合。':'查看同排相邻机架构成的候选局部子图。';
+  $('#diagnosis-confidence').textContent='Localization confidence '+percent(confidence);
+  $('#diagnosis-note').textContent=isArchive()?"Confidence is aggregated from the t+60 risks of the spatial object's members. It indicates inspection priority, not a verified fault probability.":layer==='node'?"Example mapping of the selected sensor's current temperature and future probability.":layer==='edge'?'Inspect candidate directed Front–Back thermal coupling at the same rack and height.':'Inspect the candidate local subgraph formed by adjacent racks in the same row.';
 }
 function drawTrajectory(n) {
   if(isArchive()){drawArchiveTrajectory(n);return;}
   $('#trajectory-title').textContent=n.rack+' · '+n.side+' · '+levels[n.heightIndex];
-  $('#trajectory-title').nextElementSibling.textContent='轨迹与区间为交互演示，尚未接入冻结预测结果';
+  $('#trajectory-title').nextElementSibling.textContent='The trajectory and interval are interactive demonstrations and are not connected to frozen forecasts.';
   $('#trajectory-chart .uncertainty-band').style.display='';
   const base=n.temperature,amp=.14+.25*probability(n,60),f=h=>base+amp*(1-Math.exp(-h/26));
   const sy=t=>142-(t-base)*150;
@@ -231,34 +312,39 @@ function drawTrajectory(n) {
 }
 function drawArchiveTrajectory(n){
   const a=archive(),p=a.packet,o=p.originOffsets[a.index],history=p.temperature.slice(o-60,o+1).map(row=>row[n.index]),pred=[n.temperature,...p.prediction[a.index].map(row=>row[n.index])];
-  $('#trajectory-title').textContent=n.id+' · 真实历史 / 冻结预测';
-  $('#trajectory-title').nextElementSibling.textContent=p.origins[a.index]+'发布 · 左侧过去60 min · 右侧未来60 min · 未展示未接入的置信区间';
-  const values=[...history,...pred].filter(Number.isFinite),min=Math.min(...values)-.08,max=Math.max(...values)+.08,sy=v=>184-(v-min)/(max-min)*150;
+  $('#trajectory-title').textContent=n.id+' · Archived History / Frozen Forecast';
+  const bounds=Array.from({length:60},(_,h)=>riskSummary(n,h+1));
+  $('#trajectory-title').nextElementSibling.textContent=p.origins[a.index]+' issued · past 60 min on the left · future 60 min on the right · 90% empirical prediction interval';
+  const values=[...history,...pred,...bounds.flatMap(b=>b?[b.lower,b.upper]:[])].filter(Number.isFinite),min=Math.min(...values)-.08,max=Math.max(...values)+.08,sy=v=>184-(v-min)/(max-min)*150;
   const path=(v,x,w)=>v.map((t,i)=>(i?'L':'M')+(x+i*w/60).toFixed(2)+' '+sy(t).toFixed(2)).join(' ');
-  $('#trajectory-chart .observed-line').setAttribute('d',path(history,48,342));$('#trajectory-chart .forecast-line').setAttribute('d',path(pred,390,346));$('#trajectory-chart .uncertainty-band').style.display='none';
+  $('#trajectory-chart .observed-line').setAttribute('d',path(history,48,342));$('#trajectory-chart .forecast-line').setAttribute('d',path(pred,390,346));
+  const upper=[n.temperature,...bounds.map(b=>b?.upper??n.temperature)],lower=[n.temperature,...bounds.map(b=>b?.lower??n.temperature)].reverse();
+  const upperPoints=upper.map((v,i)=>[390+i*346/60,sy(v)]),lowerPoints=lower.map((v,i)=>[736-i*346/60,sy(v)]);
+  const band=[...upperPoints,...lowerPoints].map((q,i)=>(i?'L':'M')+q[0].toFixed(2)+' '+q[1].toFixed(2)).join(' ')+'Z';
+  $('#trajectory-chart .uncertainty-band').setAttribute('d',band);$('#trajectory-chart .uncertainty-band').style.display='';
   const labels=$$('#trajectory-chart text');labels[0].textContent=(min+(184-70)/150*(max-min)).toFixed(2);labels[1].textContent=(min+(184-128)/150*(max-min)).toFixed(2);
   $('#horizon-point').setAttribute('cx',390+view.horizon*346/60);$('#horizon-point').setAttribute('cy',sy(pred[view.horizon]));
 }
 function refreshField() {
   const isTemp=view.field==='temperature';
   nodes.forEach((n,i)=>{
-    const color=isTemp?scalarColor(n.temperature,isArchive()?28:22,isArchive()?43:34,thermalStops):isArchive()?new THREE.Color('#67768b'):scalarColor(probability(n,view.horizon),0,1,riskStops);
+    const color=isTemp?scalarColor(n.temperature,isArchive()?28:22,isArchive()?43:34,thermalStops):scalarColor(probability(n,60)??0,0,1,riskStops);
     panelMeshes[i].material.color.copy(color);sensorMeshes[i].material.color.copy(color);
   });
   $$('.twin-layer-tabs button').forEach(b=>{const selected=b.dataset.field===view.field;b.classList.toggle('active',selected);b.setAttribute('aria-selected',String(selected));});
   $('#twin-stage').setAttribute('aria-labelledby',isTemp?'layer-temperature':'layer-risk');
   $('#twin-field-name').textContent=isTemp?'CURRENT TEMPERATURE':'FUTURE DEVIATION RISK';
-  const stamp='2023-02-18 '+String(10+Math.floor(view.horizon/60)).padStart(2,'0')+':'+String(view.horizon%60).padStart(2,'0');
-  $('#twin-field-time').textContent=isTemp?'2023-02-18 10:00 · 观测快照演示':stamp+' · 10:00发布 · 概率演示';
-  if(isArchive()){const a=archive();$('#twin-field-time').textContent=isTemp?a.packet.origins[a.index]+' · 真实观测':a.packet.observationTimes[a.packet.originOffsets[a.index]+view.horizon]+' · 节点概率未接入';}
-  $('#layer-horizon').textContent=view.horizon;$('#twin-color-title').textContent=isTemp?'温度 / °C':'热偏离概率 / %';
+  const origin=isArchive()?archive().packet.origins[archive().index]:'2023-02-18 10:00';
+  const target=isArchive()?archive().packet.observationTimes[archive().packet.originOffsets[archive().index]+60]:'2023-02-18 11:00';
+  $('#twin-field-time').textContent=isTemp?origin+' · archived one-minute observation':target+' · '+origin.slice(11)+' issued · t+60 risk-confidence space';
+  if(isArchive()){const a=archive();$('#twin-field-time').textContent=isTemp?a.packet.origins[a.index]+' · archived observation':a.packet.observationTimes[a.packet.originOffsets[a.index]+60]+' · t+60 risk-confidence space';}
+  $('#layer-horizon').textContent=view.horizon;$('#twin-color-title').textContent=isTemp?'Temperature / °C':'Thermal-Deviation Probability / %';
   $('#twin-gradient').style.background='linear-gradient(90deg,'+(isTemp?thermalStops:riskStops).join(',')+')';
   $('#twin-color-ticks').innerHTML=(isTemp?(isArchive()?['28','33','38','43']:['22','26','30','34']):['0','25','50','75','100']).map(s=>'<span>'+s+'</span>').join('');
-  if(isArchive()&&!isTemp){$('#twin-gradient').style.background='#67768b';$('#twin-color-ticks').textContent='灰色 = 未接入，非零风险';}
-  $('#twin-layer-summary').textContent=isTemp?'当前温度':'未来风险';
-  $('#twin-summary-time').textContent=isTemp?'观测时刻 · 不随预测视野变化':isArchive()?'风险缓存缺失 · 不生成概率':'未来第'+view.horizon+'分钟 · 非累计发生概率';
-  $('#stat-risk').textContent=isArchive()?'未接入':Math.round(Math.max(...nodes.map(n=>probability(n,view.horizon)))*100)+'%';
-  $('#stat-risk').nextElementSibling.textContent=isArchive()?'不使用合成概率替代真实结果':'合成风险映射示例';
+  $('#twin-layer-summary').textContent=isTemp?'Current Temperature':'Future Risk';
+  $('#twin-summary-time').textContent=isTemp?'Observation time · archived research data':'Frozen trajectory and archived-residual inference';
+  $('#stat-risk').textContent=Math.round(Math.max(...nodes.map(n=>probability(n,60)).filter(Number.isFinite))*100)+'%';
+  $('#stat-risk').nextElementSibling.textContent='t+60 empirical risk probability';
   $('#stat-horizon').textContent=view.horizon;
   selectNode(view.selected);
 }
@@ -297,7 +383,7 @@ function wireInteraction() {
   dom.addEventListener('pointermove',e=>{
     if(e.buttons){tooltip.hidden=true;return;}const target=hit(e);if(!target){tooltip.hidden=true;dom.style.cursor='grab';return;}
     const d=target.object.userData,n=nodes[d.nodeIndex??(d.rackIndex*6+4)];dom.style.cursor='pointer';
-    tooltip.innerHTML='<b>'+n.id+'</b>'+n.side+' · '+levels[n.heightIndex]+'<br>当前温度 '+number(n.temperature)+' °C<br>+'+view.horizon+' min风险 '+percent(probability(n,view.horizon))+'<br><small>'+(isArchive()?'真实观测归档':'合成数值示例')+' · 点击选中</small>';
+    tooltip.innerHTML='<b>'+n.id+'</b>'+n.side+' · '+levels[n.heightIndex]+'<br>Current Temperature '+number(n.temperature)+' °C<br>+'+view.horizon+' min risk '+percent(probability(n,view.horizon))+'<br><small>'+(isArchive()?'archived observation':'synthetic numerical example')+' · click to select</small>';
     const r=dom.getBoundingClientRect();tooltip.style.left=Math.max(8,Math.min(r.width-238,e.clientX-r.left+15))+'px';tooltip.style.top=Math.max(8,Math.min(r.height-150,e.clientY-r.top+12))+'px';tooltip.hidden=false;
   });
   dom.addEventListener('pointerleave',()=>tooltip.hidden=true);
@@ -312,7 +398,6 @@ function wireInteraction() {
   $$('.twin-camera-controls button').forEach(b=>b.addEventListener('click',()=>setPose(b.dataset.pose)));
   $('#twin-reset').addEventListener('click',()=>setPose('overview'));
   $$('.twin-layer-tabs button').forEach(b=>b.addEventListener('click',()=>{view.field=b.dataset.field;refreshField();}));
-  $('#horizon').addEventListener('input',e=>{view.horizon=+e.target.value;refreshField();});
   $('#twin-edges').addEventListener('change',e=>{view.edges=e.target.checked;graphGroup.visible=view.edges;selectedEdges.visible=view.edges;$('#twin-edge-legend').hidden=!view.edges;});
   $('#twin-shell').addEventListener('change',e=>{view.shell=e.target.checked;shells.forEach(m=>m.visible=view.shell);});
   const rackSelect=$('#twin-rack-select');
@@ -323,13 +408,13 @@ function wireInteraction() {
 }
 async function init() {
   await window.thermalReplay.ready;
-  const response=await fetch('./data/topology.json');if(!response.ok)throw Error('拓扑文件加载失败');
+  const response=await fetch('./data/topology.json');if(!response.ok)throw Error('Failed to load topology file');
   topology=await response.json();nodes=buildNodeData(topology.node_order);
   scene=new THREE.Scene();camera=new THREE.PerspectiveCamera(43,1,.1,120);camera.position.set(11,9,12);
   renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});renderer.setPixelRatio(Math.min(devicePixelRatio,2));
   renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;
   renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1;
-  renderer.domElement.tabIndex=0;renderer.domElement.setAttribute('aria-label','三维机房。方向键旋转，加减键缩放，Home复位；下方下拉框可定位全部监测点。');
+  renderer.domElement.tabIndex=0;renderer.domElement.setAttribute('aria-label','3D data center. Use arrow keys to rotate, plus/minus to zoom, and Home to reset; use the selectors below to locate any monitoring node.');
   $('#twin-canvas').appendChild(renderer.domElement);
   controls=new OrbitControls(camera,renderer.domElement);controls.target.set(.5,.5,0);controls.enableDamping=true;controls.dampingFactor=.12;
   controls.minDistance=2.2;controls.maxDistance=35;controls.maxPolarAngle=Math.PI*.485;controls.minPolarAngle=.02;controls.update();
@@ -347,8 +432,9 @@ async function init() {
   }
   animate();$('#twin-loading').hidden=true;
   // Read-only state enables transparent verification and future real-data integration.
-  window.thermalTwin={getSnapshot:()=>({field:view.field,horizon:view.horizon,selected:nodes[view.selected].id,nodeCount:nodes.length,rackCount:12,edgeCount:topology.edge_count,edgesVisible:view.edges,shellVisible:view.shell,dataMode:isArchive()?'historical_replay':'illustrative',temperatures:nodes.map(n=>n.temperature),risks:nodes.map(n=>probability(n,view.horizon)),colors:panelMeshes.map(m=>m.material.color.getHexString()),positions:nodes.map(n=>n.position.toArray()),camera:camera.position.toArray()}),getSelection:()=>({...nodes[view.selected],risk:isArchive()?null:probability(nodes[view.selected],view.horizon)*100,field:view.field,horizon:view.horizon,mode:archive().mode,origin:isArchive()?archive().packet.origins[archive().index]:'2023-02-18 10:00',prediction:isArchive()?archive().packet.prediction[archive().index][view.horizon-1][view.selected]:null}),exportImage:()=>{
-    renderer.render(scene,camera);const canvas=document.createElement('canvas');canvas.width=renderer.domElement.width;canvas.height=renderer.domElement.height+100;const ctx=canvas.getContext('2d');ctx.fillStyle='#101d30';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(renderer.domElement,0,0);ctx.fillStyle='#e1ecfa';ctx.font='20px Microsoft YaHei';ctx.fillText((isArchive()?'TDC2.0真实归档 '+archive().packet.origins[archive().index]:'合成示例')+' · '+(view.field==='temperature'?'温度 / °C':'风险图层')+' · h='+view.horizon+' min',24,canvas.height-64);ctx.font='16px Microsoft YaHei';ctx.fillText('结构映射，非测绘尺寸；'+(isArchive()&&view.field==='risk'?'灰色表示节点概率未接入':'色块对应监测点，非CFD插值'),24,canvas.height-30);const a=document.createElement('a');a.download='thermalgraph-'+view.field+'.png';a.href=canvas.toDataURL('image/png');a.click();
+  window.thermalTwin={getSnapshot:()=>({field:view.field,horizon:60,selected:nodes[view.selected].id,nodeCount:nodes.length,rackCount:12,edgeCount:topology.edge_count,edgesVisible:view.edges,shellVisible:view.shell,dataMode:'historical_replay',temperatures:nodes.map(n=>n.temperature),risks:nodes.map(n=>probability(n,60)),colors:panelMeshes.map(m=>m.material.color.getHexString()),positions:nodes.map(n=>n.position.toArray()),camera:camera.position.toArray()}),getSelection:()=>{const n=nodes[view.selected],risk=riskSummary(n,60);return {...n,risk:risk?.probability*100,intervalLower:risk?.lower,intervalUpper:risk?.upper,referenceLower:risk?.referenceLower,referenceUpper:risk?.referenceUpper,riskSampleCount:risk?.sampleCount,riskCurve:Array.from({length:60},(_,h)=>riskSummary(n,h+1)?.probability*100),observationEvidence:observationEvidence(n),field:view.field,horizon:60,mode:'replay',origin:archive().packet.origins[archive().index],targetTime:archive().packet.observationTimes[archive().packet.originOffsets[archive().index]+60],prediction:archive().packet.prediction[archive().index][59][view.selected]}},getTopRisks:(limit=4)=>nodes.map(n=>{const r=riskSummary(n,60);return {...n,risk:r?.probability*100,prediction:r?.prediction,intervalLower:r?.lower,intervalUpper:r?.upper,referenceLower:r?.referenceLower,referenceUpper:r?.referenceUpper,riskSampleCount:r?.sampleCount,riskCurve:Array.from({length:60},(_,h)=>riskSummary(n,h+1)?.probability*100),origin:archive().packet.origins[archive().index],targetTime:archive().packet.observationTimes[archive().packet.originOffsets[archive().index]+60]}}).sort((a,b)=>(b.risk??-1)-(a.risk??-1)).slice(0,limit).map(n=>({...n,observationEvidence:observationEvidence(n)})),exportImage:()=>{
+    renderer.render(scene,camera);const canvas=document.createElement('canvas');canvas.width=renderer.domElement.width;canvas.height=renderer.domElement.height+100;const ctx=canvas.getContext('2d');ctx.fillStyle='#101d30';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.drawImage(renderer.domElement,0,0);ctx.fillStyle='#e1ecfa';ctx.font='20px Arial';ctx.fillText((isArchive()?'TDC2.0 archived data '+archive().packet.origins[archive().index]:'synthetic example')+' · '+(view.field==='temperature'?'Temperature / °C':'Risk layer')+' · h='+view.horizon+' min',24,canvas.height-64);ctx.font='16px Arial';ctx.fillText('Structural mapping, not survey dimensions; '+(isArchive()&&view.field==='risk'?'gray denotes unavailable node probability':'colored blocks represent monitoring nodes, not CFD interpolation'),24,canvas.height-30);const a=document.createElement('a');a.download='thermalgraph-'+view.field+'.png';a.href=canvas.toDataURL('image/png');a.click();
   }};
+  setTimeout(()=>selectNode(view.selected,false),0);
 }
-init().catch(error=>{console.error(error);$('#twin-loading').textContent='三维场景未能加载。请启用浏览器硬件加速并刷新页面。若仍无法显示，请检查浏览器是否支持WebGL 2。';});
+init().catch(error=>{console.error(error);$('#twin-loading').textContent='The 3D scene could not be loaded. Enable browser hardware acceleration and refresh the page. If the problem persists, verify WebGL 2 support.';});
